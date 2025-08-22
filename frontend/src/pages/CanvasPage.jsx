@@ -465,7 +465,13 @@ export default function CanvasPage() {
       top = rect.top + (first.y + 0.5) * (rect.height / GRID_ROWS) - 8;
     }
 
-    setBubble({ left, top, message, amountCents, until: Date.now() + 9000 });
+    setBubble({
+      left,
+      top,
+      message: message && message.trim() ? message : "Thank You!",
+      amountCents,
+      until: Date.now() + 9000,
+    });
 
     if (bubbleTimerRef.current) clearTimeout(bubbleTimerRef.current);
     bubbleTimerRef.current = setTimeout(() => setBubble(null), 9000);
