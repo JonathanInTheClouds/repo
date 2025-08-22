@@ -10,6 +10,8 @@ import { io } from "socket.io-client";
 import CanvasPage from "./pages/CanvasPage";
 import PaymentIntro from "./pages/PaymentIntro";
 import SimulatePage from "./pages/SimulatePage";
+import Cancel from "./pages/Cancel";
+import Success from "./pages/Success";
 import "./App.css"; // <-- nav styles live here
 
 // -------- shared envs --------
@@ -44,6 +46,8 @@ export default function App() {
           <Route path="/" element={<CanvasPage />} />
           <Route path="/support" element={<PaymentIntro />} />
           <Route path="/simulate" element={<SimulatePage />} />
+          <Route path="/success" element={<Success />} />
+          <Route path="/cancel" element={<Cancel />} />
         </Routes>
       </main>
     </Router>
