@@ -1,72 +1,87 @@
-import Database from "better-sqlite3";
+// db.js (Postgres)
+import pkg from "pg";
+const { Pool } = pkg;
 
-const db = new Database(process.env.DB_FILE || "data.sqlite");
-db.pragma("journal_mode = WAL");
-db.pragma("synchronous = NORMAL");
-
-db.exec(`
-CREATE TABLE IF NOT EXISTS revealed (
-  x INTEGER NOT NULL,
-  y INTEGER NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  PRIMARY KEY (x, y)
-);
-
-CREATE TABLE IF NOT EXISTS processed_events (
-  event_id TEXT PRIMARY KEY,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS donations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id TEXT NOT NULL,
-  amount_cents INTEGER NOT NULL,
-  message TEXT,
-  cells_allocated INTEGER NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-/* Map each revealed cell to the event that allocated it */
-CREATE TABLE IF NOT EXISTS cell_allocations (
-  x INTEGER NOT NULL,
-  y INTEGER NOT NULL,
-  event_id TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  PRIMARY KEY (x, y),
-  FOREIGN KEY (x, y) REFERENCES revealed(x, y) ON DELETE CASCADE
-);
-`);
-
-export function getAllCells() {
-  return db.prepare("SELECT x, y FROM revealed").all();
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  throw new Error("Missing DATABASE_URL env var");
 }
 
-export function tryInsertEvent(eventId) {
-  const info = db
-    .prepare("INSERT OR IGNORE INTO processed_events(event_id) VALUES (?)")
-    .run(eventId);
-  return info.changes === 1;
+export const pool = new Pool({
+  connectionString: DATABASE_URL,
+  // DO dev DBs require SSL; the URL already has ?sslmode=require
+  // This option helps when sslmode is not parsed by libpq
+  ssl: { rejectUnauthorized: false },
+});
+
+async function init() {
+  const sql = `
+  CREATE TABLE IF NOT EXISTS revealed (
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (x, y)
+  );
+
+  CREATE TABLE IF NOT EXISTS processed_events (
+    event_id TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS donations (
+    id SERIAL PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    message TEXT,
+    cells_allocated INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS cell_allocations (
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (x, y),
+    FOREIGN KEY (x, y) REFERENCES revealed(x, y) ON DELETE CASCADE
+  );
+  `;
+  await pool.query(sql);
+}
+await init();
+
+/* ------------ helpers ------------- */
+
+export async function getAllCells() {
+  const { rows } = await pool.query(`SELECT x, y FROM revealed`);
+  return rows;
 }
 
-export function recordDonation({ eventId, amountCents, message, cells }) {
-  db.prepare(
-    "INSERT INTO donations(event_id, amount_cents, message, cells_allocated) VALUES (?,?,?,?)"
-  ).run(eventId, amountCents, message || "", cells);
+export async function tryInsertEvent(eventId) {
+  const { rowCount } = await pool.query(
+    `INSERT INTO processed_events(event_id) VALUES ($1)
+     ON CONFLICT (event_id) DO NOTHING`,
+    [eventId]
+  );
+  return rowCount === 1; // true if we inserted (i.e., first time seeing this event)
+}
+
+export async function recordDonation({ eventId, amountCents, message, cells }) {
+  await pool.query(
+    `INSERT INTO donations(event_id, amount_cents, message, cells_allocated)
+     VALUES ($1,$2,$3,$4)`,
+    [eventId, amountCents, message || "", cells]
+  );
 }
 
 /**
  * Atomically allocate `qty` unique cells and associate them to `eventId`.
  * Returns array of {x,y}.
  */
-export function allocateCellsForEventAtomic(qty, gridW, gridH, eventId) {
-  const insertCell = db.prepare(
-    "INSERT OR IGNORE INTO revealed(x,y) VALUES (?,?)"
-  );
-  const mapAlloc = db.prepare(
-    "INSERT OR IGNORE INTO cell_allocations(x,y,event_id) VALUES (?,?,?)"
-  );
-
-  const txn = db.transaction((qty) => {
+export async function allocateCellsForEventAtomic(qty, gridW, gridH, eventId) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
     const allocated = [];
     let attempts = 0;
 
@@ -91,40 +106,56 @@ export function allocateCellsForEventAtomic(qty, gridW, gridH, eventId) {
         if (seen.has(k)) continue;
         seen.add(k);
 
-        const info = insertCell.run(x, y);
-        if (info.changes === 1) {
+        // Try to insert; succeed only if not taken
+        const ins = await client.query(
+          `INSERT INTO revealed(x,y) VALUES ($1,$2)
+           ON CONFLICT (x,y) DO NOTHING
+           RETURNING x,y`,
+          [x, y]
+        );
+
+        if (ins.rowCount === 1) {
           allocated.push({ x, y });
-          mapAlloc.run(x, y, eventId);
+          await client.query(
+            `INSERT INTO cell_allocations(x,y,event_id) VALUES ($1,$2,$3)
+             ON CONFLICT (x,y) DO NOTHING`,
+            [x, y, eventId]
+          );
         }
         for (const [nx, ny] of neighborsOf(x, y)) q.push([nx, ny]);
       }
     }
-    return allocated;
-  });
 
-  return txn(qty);
+    await client.query("COMMIT");
+    return allocated;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 /** Return details for a cell, or null if not revealed */
-export function getCellDetails(x, y) {
-  return db
-    .prepare(
-      `
-      SELECT
-        r.x, r.y,
-        r.created_at AS revealed_at,
-        ca.event_id,
-        d.amount_cents,
-        d.message,
-        d.cells_allocated,
-        d.created_at AS donation_at
-      FROM revealed r
-      LEFT JOIN cell_allocations ca ON ca.x = r.x AND ca.y = r.y
-      LEFT JOIN donations d ON d.event_id = ca.event_id
-      WHERE r.x = ? AND r.y = ?
-      `
-    )
-    .get(x, y);
+export async function getCellDetails(x, y) {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      r.x, r.y,
+      r.created_at AS revealed_at,
+      ca.event_id,
+      d.amount_cents,
+      d.message,
+      d.cells_allocated,
+      d.created_at AS donation_at
+    FROM revealed r
+    LEFT JOIN cell_allocations ca ON ca.x = r.x AND ca.y = r.y
+    LEFT JOIN donations d ON d.event_id = ca.event_id
+    WHERE r.x = $1 AND r.y = $2
+    `,
+    [x, y]
+  );
+  return rows[0] || null;
 }
 
-export default db;
+export default pool;
