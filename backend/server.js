@@ -22,18 +22,19 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const GRID_COLUMNS = 200;
 const GRID_ROWS = 200;
 const centsPerCell = Number(process.env.CENTS_PER_CELL || 2500); // $25 default
+const CENTS_PER_CELL = centsPerCell;
 
 /* ---------- app & io ---------- */
 const app = express();
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
-  path: SOCKET_IO_PATH, // <-- important when behind a prefix
+  path: SOCKET_IO_PATH,
   cors: { origin: CORS_ORIGIN },
 });
 app.use(cors({ origin: CORS_ORIGIN }));
 
-/* small health/debug endpoint to confirm base mounting */
-app.get(`${BASE_PATH}/healthz`, (_req, res) =>
+/* health at BOTH prefixed and root for sanity */
+app.get(["/healthz", `${BASE_PATH}/healthz`], (_req, res) =>
   res.json({
     ok: true,
     basePath: BASE_PATH,
@@ -50,11 +51,11 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 const nowTs = () => Date.now();
 
 /* =========================================================
-   Router mounted at BASE_PATH so routes work behind a prefix
+   Router (mounted at BOTH "/" and BASE_PATH)
    ========================================================= */
 const router = express.Router();
 
-/* WEBHOOK must use raw body (and be declared BEFORE json parser) */
+/* WEBHOOK must use raw body (before json) */
 router.post(
   "/stripe/webhook",
   bodyParser.raw({ type: "application/json" }),
@@ -145,7 +146,7 @@ router.post(
   }
 );
 
-/* JSON parser for the REST API (after webhook only) */
+/* JSON parser for the REST API (AFTER webhook only) */
 router.use(express.json());
 
 /* ---------- REST ---------- */
@@ -200,8 +201,6 @@ router.get("/state", async (_req, res) => {
 });
 
 /* --- simulation helpers --- */
-const CENTS_PER_CELL = Number(process.env.CENTS_PER_CELL || 2500);
-
 async function allocateByAmount(amountCents = 2500, message = "") {
   const qty = Math.floor(Number(amountCents) / CENTS_PER_CELL);
   if (qty <= 0) {
@@ -246,10 +245,13 @@ router.post("/simulate/batch", async (req, res) => {
   }
 });
 
-/* mount router at BASE_PATH */
+/* ---------- mount router at BOTH paths ---------- */
 app.use(BASE_PATH, router);
+if (BASE_PATH !== "/") {
+  app.use("/", router);
+}
 
-/* sockets */
+/* ---------- sockets ---------- */
 io.on("connection", async (socket) => {
   try {
     const cells = await getAllCells();
@@ -259,7 +261,7 @@ io.on("connection", async (socket) => {
   }
 });
 
-/* start */
+/* ---------- start ---------- */
 const port = process.env.PORT || 3001;
 server.listen(port, () => {
   console.log(
