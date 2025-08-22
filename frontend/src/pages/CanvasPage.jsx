@@ -241,10 +241,8 @@ export default function CanvasPage() {
         orderId ||
         `grp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-      // persist group meta
-      if (message || typeof amountCents === "number") {
-        groupMetaRef.current.set(gid, { message, amountCents });
-      }
+      // persist group meta (may be empty string)
+      groupMetaRef.current.set(gid, { message, amountCents });
 
       // map every cell -> groupId
       if (Array.isArray(cells)) {
@@ -255,7 +253,8 @@ export default function CanvasPage() {
 
       // also put message/amount onto each cell object (so hover works even without lookup)
       const enriched =
-        Array.isArray(cells) && (message || typeof amountCents === "number")
+        Array.isArray(cells) &&
+        (message !== undefined || typeof amountCents === "number")
           ? cells.map((c) => ({ ...c, message, amountCents }))
           : cells;
 
@@ -270,7 +269,9 @@ export default function CanvasPage() {
         tintsRef.current.set(kk, { color: DESIRED_TINT, t0 });
       }
       kickPulse();
-      if (message) showBubbleForCells(cells || [], message, amountCents);
+
+      // always show a bubble; fallback text handled inside
+      showBubbleForCells(cells || [], message, amountCents);
 
       // heal any races
       scheduleReconcileBurst();
@@ -284,12 +285,12 @@ export default function CanvasPage() {
     socket.on("bootstrap", onBootstrap);
     socket.on("cells_revealed", onCells);
     socket.on("donation_message", ({ message, amountCents, orderId }) => {
-      // message-only (no cells)
       const gid =
         orderId ||
         `grp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       groupMetaRef.current.set(gid, { message, amountCents });
-      if (message) showBubbleForCells([], message, amountCents);
+      // always show bubble even if message is empty
+      showBubbleForCells([], message, amountCents);
     });
 
     const iv = setInterval(reconcileFromServer, 20000);
@@ -513,11 +514,10 @@ export default function CanvasPage() {
                 <b>Amount</b> ${(hover.cell.amountCents / 100).toFixed(2)}
               </div>
             )}
-            {hover.cell.message && (
-              <div className="tip-row msg">
-                “{hover.cell.message?.trim() || "Thank You!"}”
-              </div>
-            )}
+            {/* Always render; fallback to Thank You! */}
+            <div className="tip-row msg">
+              “{hover.cell.message?.trim() || "Thank You!"}”
+            </div>
           </div>
         )}
 
@@ -531,9 +531,7 @@ export default function CanvasPage() {
                 ${(bubble.amountCents / 100).toFixed(2)}
               </div>
             )}
-            {bubble.message && (
-              <div className="bubble-msg">“{bubble.message}”</div>
-            )}
+            <div className="bubble-msg">“{bubble.message}”</div>
           </div>
         )}
       </div>
