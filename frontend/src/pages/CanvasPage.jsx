@@ -514,7 +514,9 @@ export default function CanvasPage() {
               </div>
             )}
             {hover.cell.message && (
-              <div className="tip-row msg">“{hover.cell.message}”</div>
+              <div className="tip-row msg">
+                “{hover.cell.message?.trim() || "Thank You!"}”
+              </div>
             )}
           </div>
         )}
