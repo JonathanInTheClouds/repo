@@ -270,7 +270,7 @@ export default function CanvasPage() {
         tintsRef.current.set(kk, { color: DESIRED_TINT, t0 });
       }
       kickPulse();
-      if (message) showBubbleForCells(cells || [], message, amountCents);
+      showBubbleForCells(cells || [], message, amountCents);
 
       // heal any races
       scheduleReconcileBurst();
@@ -289,7 +289,7 @@ export default function CanvasPage() {
         orderId ||
         `grp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       groupMetaRef.current.set(gid, { message, amountCents });
-      if (message) showBubbleForCells([], message, amountCents);
+      showBubbleForCells([], message, amountCents);
     });
 
     const iv = setInterval(reconcileFromServer, 20000);
@@ -513,11 +513,9 @@ export default function CanvasPage() {
                 <b>Amount</b> ${(hover.cell.amountCents / 100).toFixed(2)}
               </div>
             )}
-            {hover.cell.message && (
-              <div className="tip-row msg">
-                “{hover.cell.message?.trim() || "Thank You!"}”
-              </div>
-            )}
+            <div className="tip-row msg">
+              “{hover.cell.message?.trim() || "Thank You!"}”
+            </div>
           </div>
         )}
 
