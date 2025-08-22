@@ -129,6 +129,15 @@ app.post(
    ====================================== */
 app.use(express.json());
 
+app.get("/_whoami", (_req, res) => {
+  res.set("Content-Type", "application/json");
+  res.json({
+    ok: true,
+    basePath: process.env.APP_BASE_PATH || "/",
+    time: new Date().toISOString(),
+  });
+});
+
 // ---- REST ----
 app.post(`${BASE_PATH}/create-checkout-session`, async (req, res) => {
   try {
