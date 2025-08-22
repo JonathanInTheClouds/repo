@@ -289,7 +289,7 @@ export default function CanvasPage() {
         orderId ||
         `grp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       groupMetaRef.current.set(gid, { message, amountCents });
-      showBubbleForCells([], message, amountCents);
+      if (message) showBubbleForCells([], message, amountCents);
     });
 
     const iv = setInterval(reconcileFromServer, 20000);
