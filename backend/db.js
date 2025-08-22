@@ -1,36 +1,41 @@
-// db.js (Postgres hardened for DO)
+// db.js
 import pkg from "pg";
+import { parse as parsePgUrl } from "pg-connection-string";
 const { Pool } = pkg;
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("Missing DATABASE_URL env var");
 
-/**
- * SSL rules:
- * - DB_SSL: "0" disables SSL entirely. Anything else (or unset) -> SSL on.
- * - PGSSLMODE:
- *    - "disable" -> SSL off
- *    - "require" / "verify-ca" / "verify-full" -> SSL on
- *    - "no-verify" -> SSL on, but skip CA verification (rejectUnauthorized=false)
- * Default when not provided: SSL on, no-verify (works with DO managed PG).
- */
+// Parse the URL so we can override SSL reliably.
+// We always enable TLS in DO and, by default, skip CA verification.
+// You can flip DB_SSL=0 to turn SSL off (not recommended in DO).
+const cfg = parsePgUrl(DATABASE_URL);
+
+// Want SSL?
 const wantSSL =
   (process.env.DB_SSL ?? "1") !== "0" &&
   (process.env.PGSSLMODE ?? "").toLowerCase() !== "disable";
 
-const pgssl = !wantSSL
+const sslConfig = !wantSSL
   ? false
-  : (process.env.PGSSLMODE ?? "").toLowerCase() === "no-verify"
-  ? { rejectUnauthorized: false }
-  : // For "require"/"verify-*" cases we still default to relaxed CA unless you mount a CA cert.
+  : // If explicitly asked for verify, you can mount a CA and set rejectUnauthorized:true
+  (process.env.PGSSLMODE ?? "").toLowerCase() === "verify-full"
+  ? { rejectUnauthorized: true }
+  : // default / no-verify path that fixes "self-signed certificate in chain"
     { rejectUnauthorized: false };
 
 export const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: pgssl,
+  host: cfg.host,
+  port: cfg.port ? Number(cfg.port) : undefined,
+  database: cfg.database,
+  user: cfg.user,
+  password: cfg.password,
+  ssl: sslConfig,
+  // optional: tune pool if you want
+  // max: 10, idleTimeoutMillis: 10_000
 });
 
-// Auto-init schema on boot
+// Auto-init schema
 await pool.query(`
 CREATE TABLE IF NOT EXISTS revealed (
   x INTEGER NOT NULL,
@@ -38,12 +43,10 @@ CREATE TABLE IF NOT EXISTS revealed (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (x, y)
 );
-
 CREATE TABLE IF NOT EXISTS processed_events (
   event_id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
 CREATE TABLE IF NOT EXISTS donations (
   id SERIAL PRIMARY KEY,
   event_id TEXT NOT NULL,
@@ -52,7 +55,6 @@ CREATE TABLE IF NOT EXISTS donations (
   cells_allocated INTEGER NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
 CREATE TABLE IF NOT EXISTS cell_allocations (
   x INTEGER NOT NULL,
   y INTEGER NOT NULL,
@@ -63,13 +65,11 @@ CREATE TABLE IF NOT EXISTS cell_allocations (
 );
 `);
 
-/* ------------ helpers ------------- */
-
+/* ---------- helpers (unchanged) ---------- */
 export async function getAllCells() {
   const { rows } = await pool.query(`SELECT x, y FROM revealed ORDER BY x, y`);
   return rows;
 }
-
 export async function tryInsertEvent(eventId) {
   const { rowCount } = await pool.query(
     `INSERT INTO processed_events(event_id) VALUES ($1)
@@ -78,7 +78,6 @@ export async function tryInsertEvent(eventId) {
   );
   return rowCount === 1;
 }
-
 export async function recordDonation({ eventId, amountCents, message, cells }) {
   await pool.query(
     `INSERT INTO donations(event_id, amount_cents, message, cells_allocated)
@@ -86,11 +85,6 @@ export async function recordDonation({ eventId, amountCents, message, cells }) {
     [eventId, amountCents, message || "", cells]
   );
 }
-
-/**
- * Atomically allocate `qty` unique cells and associate them to `eventId`.
- * Returns array of {x,y}.
- */
 export async function allocateCellsForEventAtomic(qty, gridW, gridH, eventId) {
   const client = await pool.connect();
   try {
@@ -146,19 +140,12 @@ export async function allocateCellsForEventAtomic(qty, gridW, gridH, eventId) {
     client.release();
   }
 }
-
-/** Return details for a cell, or null if not revealed */
 export async function getCellDetails(x, y) {
   const { rows } = await pool.query(
     `
-    SELECT
-      r.x, r.y,
-      r.created_at AS revealed_at,
-      ca.event_id,
-      d.amount_cents,
-      d.message,
-      d.cells_allocated,
-      d.created_at AS donation_at
+    SELECT r.x, r.y, r.created_at AS revealed_at,
+           ca.event_id, d.amount_cents, d.message, d.cells_allocated,
+           d.created_at AS donation_at
     FROM revealed r
     LEFT JOIN cell_allocations ca ON ca.x = r.x AND ca.y = r.y
     LEFT JOIN donations d ON d.event_id = ca.event_id
@@ -168,5 +155,4 @@ export async function getCellDetails(x, y) {
   );
   return rows[0] || null;
 }
-
 export default pool;
