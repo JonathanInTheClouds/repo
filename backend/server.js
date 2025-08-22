@@ -14,34 +14,49 @@ import {
   allocateCellsForEventAtomic,
 } from "./db.js";
 
-// ---- config ----
-const BASE_PATH = process.env.BASE_PATH || ""; // "" locally, "/repo-backend" on DO
+/* ---------- config ---------- */
+const BASE_PATH = (process.env.BASE_PATH || "/").replace(/\/+$/, "") || "/";
+const SOCKET_IO_PATH = process.env.SOCKET_IO_PATH || "/socket.io";
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+
 const GRID_COLUMNS = 200;
 const GRID_ROWS = 200;
-const centsPerCell = Number(process.env.CENTS_PER_CELL || 2500);
-const nowTs = () => Date.now();
+const centsPerCell = Number(process.env.CENTS_PER_CELL || 2500); // $25 default
 
-// ---- app & io ----
+/* ---------- app & io ---------- */
 const app = express();
-app.set("trust proxy", true);
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
-
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
-  path: `${BASE_PATH}/socket.io`, // <-- critical behind proxy prefix
-  cors: { origin: process.env.CORS_ORIGIN || "*" },
+  path: SOCKET_IO_PATH, // <-- important when behind a prefix
+  cors: { origin: CORS_ORIGIN },
 });
+app.use(cors({ origin: CORS_ORIGIN }));
 
-// ---- stripe ----
+/* small health/debug endpoint to confirm base mounting */
+app.get(`${BASE_PATH}/healthz`, (_req, res) =>
+  res.json({
+    ok: true,
+    basePath: BASE_PATH,
+    socketPath: SOCKET_IO_PATH,
+    time: new Date().toISOString(),
+  })
+);
+
+/* ---------- stripe ---------- */
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
 });
 
-/* ======================================
-   WEBHOOK (must be FIRST; RAW BODY)
-   ====================================== */
-app.post(
-  `${BASE_PATH}/stripe/webhook`,
+const nowTs = () => Date.now();
+
+/* =========================================================
+   Router mounted at BASE_PATH so routes work behind a prefix
+   ========================================================= */
+const router = express.Router();
+
+/* WEBHOOK must use raw body (and be declared BEFORE json parser) */
+router.post(
+  "/stripe/webhook",
   bodyParser.raw({ type: "application/json" }),
   async (req, res) => {
     let event;
@@ -58,15 +73,18 @@ app.post(
     }
 
     try {
-      // DB idempotency
+      // idempotency using DB
       const firstTime = await tryInsertEvent(event.id);
-      if (!firstTime) return res.json({ received: true, deduped: true });
+      if (!firstTime) {
+        return res.json({ received: true, deduped: true });
+      }
 
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object;
           const amountCents = session.amount_total ?? 0;
           const message = session.metadata?.message || "";
+
           const cellsToReveal = Math.floor(amountCents / centsPerCell);
 
           if (cellsToReveal <= 0) {
@@ -84,6 +102,7 @@ app.post(
             return res.json({ received: true });
           }
 
+          // Allocate atomically in DB
           const cells = await allocateCellsForEventAtomic(
             cellsToReveal,
             GRID_COLUMNS,
@@ -91,6 +110,7 @@ app.post(
             event.id
           );
 
+          // Record donation meta
           await recordDonation({
             eventId: event.id,
             amountCents,
@@ -98,6 +118,7 @@ app.post(
             cells: cells.length,
           });
 
+          // Emit to clients
           io.emit("cells_revealed", {
             orderId: event.id,
             amountCents,
@@ -124,22 +145,11 @@ app.post(
   }
 );
 
-/* ======================================
-   JSON parser for the REST API (after webhook)
-   ====================================== */
-app.use(express.json());
+/* JSON parser for the REST API (after webhook only) */
+router.use(express.json());
 
-app.get("/_whoami", (_req, res) => {
-  res.set("Content-Type", "application/json");
-  res.json({
-    ok: true,
-    basePath: process.env.APP_BASE_PATH || "/",
-    time: new Date().toISOString(),
-  });
-});
-
-// ---- REST ----
-app.post(`${BASE_PATH}/create-checkout-session`, async (req, res) => {
+/* ---------- REST ---------- */
+router.post("/create-checkout-session", async (req, res) => {
   try {
     const { amount, currency = "usd", message = "" } = req.body || {};
     if (!Number.isFinite(amount) || amount < 100) {
@@ -148,9 +158,12 @@ app.post(`${BASE_PATH}/create-checkout-session`, async (req, res) => {
         .json({ error: "amount must be >= 100 (in cents)" });
     }
 
-    const origin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
-    const success = `${origin}/success`;
-    const cancel = `${origin}/cancel`;
+    const success = `${
+      process.env.FRONTEND_ORIGIN || "http://localhost:3000"
+    }/success`;
+    const cancel = `${
+      process.env.FRONTEND_ORIGIN || "http://localhost:3000"
+    }/cancel`;
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -176,7 +189,7 @@ app.post(`${BASE_PATH}/create-checkout-session`, async (req, res) => {
   }
 });
 
-app.get(`${BASE_PATH}/state`, async (_req, res) => {
+router.get("/state", async (_req, res) => {
   try {
     const cells = await getAllCells();
     res.json({ cells });
@@ -186,7 +199,7 @@ app.get(`${BASE_PATH}/state`, async (_req, res) => {
   }
 });
 
-// ---- simulator (DB-backed) ----
+/* --- simulation helpers --- */
 const CENTS_PER_CELL = Number(process.env.CENTS_PER_CELL || 2500);
 
 async function allocateByAmount(amountCents = 2500, message = "") {
@@ -205,7 +218,7 @@ async function allocateByAmount(amountCents = 2500, message = "") {
   return cells;
 }
 
-app.post(`${BASE_PATH}/simulate/purchase`, async (req, res) => {
+router.post("/simulate/purchase", async (req, res) => {
   try {
     const { amountCents = 2500, message = "" } = req.body || {};
     const cells = await allocateByAmount(amountCents, message);
@@ -216,7 +229,7 @@ app.post(`${BASE_PATH}/simulate/purchase`, async (req, res) => {
   }
 });
 
-app.post(`${BASE_PATH}/simulate/batch`, async (req, res) => {
+router.post("/simulate/batch", async (req, res) => {
   try {
     const { entries = [] } = req.body || {};
     let totalAllocated = 0;
@@ -233,7 +246,10 @@ app.post(`${BASE_PATH}/simulate/batch`, async (req, res) => {
   }
 });
 
-// ---- sockets ----
+/* mount router at BASE_PATH */
+app.use(BASE_PATH, router);
+
+/* sockets */
 io.on("connection", async (socket) => {
   try {
     const cells = await getAllCells();
@@ -243,12 +259,10 @@ io.on("connection", async (socket) => {
   }
 });
 
-// ---- health (helps App Platform readiness) ----
-app.get("/", (_req, res) => res.status(200).send("ok"));
-app.get(`${BASE_PATH}/healthz`, (_req, res) => res.status(200).send("ok"));
-
-// ---- start ----
+/* start */
 const port = process.env.PORT || 3001;
 server.listen(port, () => {
-  console.log(`API listening on :${port} (base: "${BASE_PATH}")`);
+  console.log(
+    `API listening on :${port} (base: "${BASE_PATH}", socket path: "${SOCKET_IO_PATH}")`
+  );
 });
