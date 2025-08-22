@@ -1,59 +1,72 @@
-// db.js (Postgres)
+// db.js (Postgres hardened for DO)
 import pkg from "pg";
 const { Pool } = pkg;
 
 const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  throw new Error("Missing DATABASE_URL env var");
-}
+if (!DATABASE_URL) throw new Error("Missing DATABASE_URL env var");
+
+/**
+ * SSL rules:
+ * - DB_SSL: "0" disables SSL entirely. Anything else (or unset) -> SSL on.
+ * - PGSSLMODE:
+ *    - "disable" -> SSL off
+ *    - "require" / "verify-ca" / "verify-full" -> SSL on
+ *    - "no-verify" -> SSL on, but skip CA verification (rejectUnauthorized=false)
+ * Default when not provided: SSL on, no-verify (works with DO managed PG).
+ */
+const wantSSL =
+  (process.env.DB_SSL ?? "1") !== "0" &&
+  (process.env.PGSSLMODE ?? "").toLowerCase() !== "disable";
+
+const pgssl = !wantSSL
+  ? false
+  : (process.env.PGSSLMODE ?? "").toLowerCase() === "no-verify"
+  ? { rejectUnauthorized: false }
+  : // For "require"/"verify-*" cases we still default to relaxed CA unless you mount a CA cert.
+    { rejectUnauthorized: false };
 
 export const pool = new Pool({
   connectionString: DATABASE_URL,
-  // DO dev DBs require SSL; the URL already has ?sslmode=require
-  // This option helps when sslmode is not parsed by libpq
-  ssl: { rejectUnauthorized: false },
+  ssl: pgssl,
 });
 
-async function init() {
-  const sql = `
-  CREATE TABLE IF NOT EXISTS revealed (
-    x INTEGER NOT NULL,
-    y INTEGER NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (x, y)
-  );
+// Auto-init schema on boot
+await pool.query(`
+CREATE TABLE IF NOT EXISTS revealed (
+  x INTEGER NOT NULL,
+  y INTEGER NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (x, y)
+);
 
-  CREATE TABLE IF NOT EXISTS processed_events (
-    event_id TEXT PRIMARY KEY,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
+CREATE TABLE IF NOT EXISTS processed_events (
+  event_id TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
-  CREATE TABLE IF NOT EXISTS donations (
-    id SERIAL PRIMARY KEY,
-    event_id TEXT NOT NULL,
-    amount_cents INTEGER NOT NULL,
-    message TEXT,
-    cells_allocated INTEGER NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
+CREATE TABLE IF NOT EXISTS donations (
+  id SERIAL PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL,
+  message TEXT,
+  cells_allocated INTEGER NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
-  CREATE TABLE IF NOT EXISTS cell_allocations (
-    x INTEGER NOT NULL,
-    y INTEGER NOT NULL,
-    event_id TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (x, y),
-    FOREIGN KEY (x, y) REFERENCES revealed(x, y) ON DELETE CASCADE
-  );
-  `;
-  await pool.query(sql);
-}
-await init();
+CREATE TABLE IF NOT EXISTS cell_allocations (
+  x INTEGER NOT NULL,
+  y INTEGER NOT NULL,
+  event_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (x, y),
+  FOREIGN KEY (x, y) REFERENCES revealed(x, y) ON DELETE CASCADE
+);
+`);
 
 /* ------------ helpers ------------- */
 
 export async function getAllCells() {
-  const { rows } = await pool.query(`SELECT x, y FROM revealed`);
+  const { rows } = await pool.query(`SELECT x, y FROM revealed ORDER BY x, y`);
   return rows;
 }
 
@@ -63,7 +76,7 @@ export async function tryInsertEvent(eventId) {
      ON CONFLICT (event_id) DO NOTHING`,
     [eventId]
   );
-  return rowCount === 1; // true if we inserted (i.e., first time seeing this event)
+  return rowCount === 1;
 }
 
 export async function recordDonation({ eventId, amountCents, message, cells }) {
@@ -106,14 +119,12 @@ export async function allocateCellsForEventAtomic(qty, gridW, gridH, eventId) {
         if (seen.has(k)) continue;
         seen.add(k);
 
-        // Try to insert; succeed only if not taken
         const ins = await client.query(
           `INSERT INTO revealed(x,y) VALUES ($1,$2)
            ON CONFLICT (x,y) DO NOTHING
            RETURNING x,y`,
           [x, y]
         );
-
         if (ins.rowCount === 1) {
           allocated.push({ x, y });
           await client.query(
