@@ -6,7 +6,24 @@ const API_BASE =
   process.env.REACT_APP_API_BASE ||
   (import.meta?.env && import.meta.env.VITE_API_BASE) ||
   "http://localhost:3001";
-const socket = io(API_BASE, { transports: ["websocket"], autoConnect: true });
+
+const SOCKET_URL =
+  process.env.REACT_APP_SOCKET_URL ||
+  (typeof window !== "undefined"
+    ? window.location.origin
+    : "http://localhost:3001");
+
+const SOCKET_PATH =
+  process.env.REACT_APP_SOCKET_PATH ||
+  (API_BASE.includes("/repo-backend")
+    ? "/repo-backend/socket.io"
+    : "/socket.io");
+
+const socket = io(SOCKET_URL, {
+  path: SOCKET_PATH,
+  transports: ["websocket"],
+  autoConnect: true,
+});
 
 const CANVAS_WIDTH = 1495;
 const CANVAS_HEIGHT = 1024;

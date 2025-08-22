@@ -18,6 +18,19 @@ const API_BASE =
   (import.meta?.env && import.meta.env.VITE_API_BASE) ||
   "http://localhost:3001";
 
+// Socket host + path (important behind a proxy/prefix like /repo-backend)
+const SOCKET_URL =
+  process.env.REACT_APP_SOCKET_URL ||
+  (typeof window !== "undefined"
+    ? window.location.origin
+    : "http://localhost:3001");
+
+const SOCKET_PATH =
+  process.env.REACT_APP_SOCKET_PATH ||
+  (API_BASE.includes("/repo-backend")
+    ? "/repo-backend/socket.io"
+    : "/socket.io");
+
 // Keep in sync with your canvas
 const GRID_COLUMNS = 200;
 const GRID_ROWS = 200;
@@ -58,7 +71,7 @@ function NavBar() {
         setRevealedCount(Array.isArray(cells) ? cells.length : 0);
       } catch {}
       // live
-      s = io(API_BASE, { transports: ["websocket"] });
+      s = io(SOCKET_URL, { path: SOCKET_PATH, transports: ["websocket"] });
       const onMerge = ({ cells }) => {
         if (!cells?.length) return;
         // increment by delta; backend emits only new cells

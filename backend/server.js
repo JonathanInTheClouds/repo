@@ -14,31 +14,34 @@ import {
   allocateCellsForEventAtomic,
 } from "./db.js";
 
-// ---------- app & io ----------
+// ---- config ----
+const BASE_PATH = process.env.BASE_PATH || ""; // "" locally, "/repo-backend" on DO
+const GRID_COLUMNS = 200;
+const GRID_ROWS = 200;
+const centsPerCell = Number(process.env.CENTS_PER_CELL || 2500);
+const nowTs = () => Date.now();
+
+// ---- app & io ----
 const app = express();
-const server = http.createServer(app);
-const io = new SocketIOServer(server, {
-  cors: { origin: process.env.CORS_ORIGIN || "*" },
-});
+app.set("trust proxy", true);
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
 
-// ---------- stripe ----------
+const server = http.createServer(app);
+const io = new SocketIOServer(server, {
+  path: `${BASE_PATH}/socket.io`, // <-- critical behind proxy prefix
+  cors: { origin: process.env.CORS_ORIGIN || "*" },
+});
+
+// ---- stripe ----
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20",
 });
 
-// ---------- grid ----------
-const GRID_COLUMNS = 200;
-const GRID_ROWS = 200;
-const centsPerCell = Number(process.env.CENTS_PER_CELL || 2500); // $25 default
-
-const nowTs = () => Date.now();
-
-/* ============================
-   WEBHOOK (must be FIRST; RAW)
-   ============================ */
+/* ======================================
+   WEBHOOK (must be FIRST; RAW BODY)
+   ====================================== */
 app.post(
-  "/stripe/webhook",
+  `${BASE_PATH}/stripe/webhook`,
   bodyParser.raw({ type: "application/json" }),
   async (req, res) => {
     let event;
@@ -55,18 +58,15 @@ app.post(
     }
 
     try {
-      // idempotency using DB
+      // DB idempotency
       const firstTime = await tryInsertEvent(event.id);
-      if (!firstTime) {
-        return res.json({ received: true, deduped: true });
-      }
+      if (!firstTime) return res.json({ received: true, deduped: true });
 
       switch (event.type) {
         case "checkout.session.completed": {
           const session = event.data.object;
           const amountCents = session.amount_total ?? 0;
           const message = session.metadata?.message || "";
-
           const cellsToReveal = Math.floor(amountCents / centsPerCell);
 
           if (cellsToReveal <= 0) {
@@ -84,7 +84,6 @@ app.post(
             return res.json({ received: true });
           }
 
-          // Allocate atomically in DB
           const cells = await allocateCellsForEventAtomic(
             cellsToReveal,
             GRID_COLUMNS,
@@ -92,7 +91,6 @@ app.post(
             event.id
           );
 
-          // Record donation meta
           await recordDonation({
             eventId: event.id,
             amountCents,
@@ -100,7 +98,6 @@ app.post(
             cells: cells.length,
           });
 
-          // Emit to clients
           io.emit("cells_revealed", {
             orderId: event.id,
             amountCents,
@@ -116,7 +113,6 @@ app.post(
           break;
         }
         default:
-          // ignore other events
           break;
       }
 
@@ -128,15 +124,13 @@ app.post(
   }
 );
 
-/* ============================
-   JSON parser for the REST API
-   (after webhook only)
-   ============================ */
+/* ======================================
+   JSON parser for the REST API (after webhook)
+   ====================================== */
 app.use(express.json());
 
-// ---------- REST ----------
-// Create a Checkout Session with dynamic amount + metadata (message)
-app.post("/create-checkout-session", async (req, res) => {
+// ---- REST ----
+app.post(`${BASE_PATH}/create-checkout-session`, async (req, res) => {
   try {
     const { amount, currency = "usd", message = "" } = req.body || {};
     if (!Number.isFinite(amount) || amount < 100) {
@@ -145,12 +139,9 @@ app.post("/create-checkout-session", async (req, res) => {
         .json({ error: "amount must be >= 100 (in cents)" });
     }
 
-    const success = `${
-      process.env.FRONTEND_ORIGIN || "http://localhost:3000"
-    }/success`;
-    const cancel = `${
-      process.env.FRONTEND_ORIGIN || "http://localhost:3000"
-    }/cancel`;
+    const origin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
+    const success = `${origin}/success`;
+    const cancel = `${origin}/cancel`;
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -176,8 +167,7 @@ app.post("/create-checkout-session", async (req, res) => {
   }
 });
 
-// current state for late joiners (from DB)
-app.get("/state", async (_req, res) => {
+app.get(`${BASE_PATH}/state`, async (_req, res) => {
   try {
     const cells = await getAllCells();
     res.json({ cells });
@@ -187,7 +177,7 @@ app.get("/state", async (_req, res) => {
   }
 });
 
-// --- simulation helpers (DB-backed) ---
+// ---- simulator (DB-backed) ----
 const CENTS_PER_CELL = Number(process.env.CENTS_PER_CELL || 2500);
 
 async function allocateByAmount(amountCents = 2500, message = "") {
@@ -206,8 +196,7 @@ async function allocateByAmount(amountCents = 2500, message = "") {
   return cells;
 }
 
-// Simulate a single purchase
-app.post("/simulate/purchase", async (req, res) => {
+app.post(`${BASE_PATH}/simulate/purchase`, async (req, res) => {
   try {
     const { amountCents = 2500, message = "" } = req.body || {};
     const cells = await allocateByAmount(amountCents, message);
@@ -218,8 +207,7 @@ app.post("/simulate/purchase", async (req, res) => {
   }
 });
 
-// Simulate a batch of purchases
-app.post("/simulate/batch", async (req, res) => {
+app.post(`${BASE_PATH}/simulate/batch`, async (req, res) => {
   try {
     const { entries = [] } = req.body || {};
     let totalAllocated = 0;
@@ -236,7 +224,7 @@ app.post("/simulate/batch", async (req, res) => {
   }
 });
 
-// ---------- sockets ----------
+// ---- sockets ----
 io.on("connection", async (socket) => {
   try {
     const cells = await getAllCells();
@@ -246,8 +234,12 @@ io.on("connection", async (socket) => {
   }
 });
 
-// ---------- start ----------
+// ---- health (helps App Platform readiness) ----
+app.get("/", (_req, res) => res.status(200).send("ok"));
+app.get(`${BASE_PATH}/healthz`, (_req, res) => res.status(200).send("ok"));
+
+// ---- start ----
 const port = process.env.PORT || 3001;
 server.listen(port, () => {
-  console.log(`API listening on :${port}`);
+  console.log(`API listening on :${port} (base: "${BASE_PATH}")`);
 });
