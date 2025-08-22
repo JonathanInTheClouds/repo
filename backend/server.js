@@ -5,17 +5,9 @@ import bodyParser from "body-parser";
 import cors from "cors";
 import http from "http";
 import { Server as SocketIOServer } from "socket.io";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // ---------- app & io ----------
 const app = express();
-app.set("trust proxy", true); // for Fly/proxies
-
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
   cors: { origin: process.env.CORS_ORIGIN || "*" },
@@ -39,11 +31,13 @@ const revealed = new Map(); // `${x},${y}` -> cellData
 const processedEvents = new Set(); // webhook idempotency
 
 const key = (x, y) => `${x},${y}`;
+const fromKey = (s) => s.split(",").map(Number);
 const nowTs = () => Date.now();
 
 function allRevealedCells() {
   return [...revealed.values()];
 }
+
 function taken(x, y) {
   return revealed.has(key(x, y));
 }
@@ -51,6 +45,7 @@ function taken(x, y) {
 // naive, contiguous-ish allocator (replace w/ DB later)
 function allocateCells(qty) {
   const cells = [];
+
   const neighborsOf = (x, y) =>
     [
       [x + 1, y],
@@ -73,6 +68,7 @@ function allocateCells(qty) {
     while (q.length && cells.length < qty) {
       const [x, y] = q.shift();
       if (taken(x, y)) continue;
+      // Insert minimal cell; we can enrich later
       const c = { x, y, ts: nowTs() };
       revealed.set(key(x, y), c);
       cells.push(c);
@@ -112,8 +108,10 @@ app.post(
           const session = event.data.object;
           const amountCents = session.amount_total ?? 0;
           const message = session.metadata?.message || "";
+
           const cellsToReveal = Math.floor(amountCents / centsPerCell);
 
+          // If below threshold, show message only (no cell)
           if (cellsToReveal <= 0) {
             processedEvents.add(event.id);
             io.emit("donation_message", {
@@ -130,6 +128,7 @@ app.post(
             return res.json({ received: true });
           }
 
+          // Allocate and enrich first cell with message/amount
           const cells = allocateCells(cellsToReveal);
 
           if (cells.length > 0) {
@@ -142,7 +141,7 @@ app.post(
               ts: nowTs(),
             };
             revealed.set(k0, enriched);
-            cells[0] = enriched;
+            cells[0] = enriched; // send enriched to clients
           }
 
           processedEvents.add(event.id);
@@ -161,6 +160,7 @@ app.post(
           );
           break;
         }
+
         default:
           break;
       }
@@ -179,12 +179,8 @@ app.post(
    ============================ */
 app.use(express.json());
 
-// health
-app.get("/healthz", (_req, res) =>
-  res.status(200).json({ ok: true, time: new Date().toISOString() })
-);
-
 // ---------- REST ----------
+// Create a Checkout Session with dynamic amount + metadata (message)
 app.post("/create-checkout-session", async (req, res) => {
   try {
     const { amount, currency = "usd", message = "" } = req.body || {};
@@ -194,13 +190,16 @@ app.post("/create-checkout-session", async (req, res) => {
         .json({ error: "amount must be >= 100 (in cents)" });
     }
 
-    const origin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
-    const success = `${origin}/success`;
-    const cancel = `${origin}/cancel`;
+    const success = `${
+      process.env.FRONTEND_ORIGIN || "http://localhost:3000"
+    }/success`;
+    const cancel = `${
+      process.env.FRONTEND_ORIGIN || "http://localhost:3000"
+    }/cancel`;
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
-      metadata: { message },
+      metadata: { message }, // retrieve in webhook
       line_items: [
         {
           price_data: {
@@ -222,12 +221,14 @@ app.post("/create-checkout-session", async (req, res) => {
   }
 });
 
+// current state for late joiners (includes any metadata we kept)
 app.get("/state", (_req, res) => {
   res.json({ cells: allRevealedCells() });
 });
 
 // --- simulation helpers ---
 const CENTS_PER_CELL = Number(process.env.CENTS_PER_CELL || 2500);
+
 function allocateByAmount(amountCents = 2500, message = "") {
   const qty = Math.floor(Number(amountCents) / CENTS_PER_CELL);
   if (qty <= 0) {
@@ -239,6 +240,7 @@ function allocateByAmount(amountCents = 2500, message = "") {
   return cells;
 }
 
+// Simulate a single purchase
 app.post("/simulate/purchase", (req, res) => {
   try {
     const { amountCents = 2500, message = "" } = req.body || {};
@@ -250,6 +252,7 @@ app.post("/simulate/purchase", (req, res) => {
   }
 });
 
+// Simulate a batch of purchases
 app.post("/simulate/batch", (req, res) => {
   try {
     const { entries = [] } = req.body || {};
@@ -271,26 +274,6 @@ app.post("/simulate/batch", (req, res) => {
 io.on("connection", (socket) => {
   socket.emit("bootstrap", { cells: allRevealedCells() });
 });
-
-// ---------- serve frontend build (prod) ----------
-(() => {
-  const candidates = [
-    path.join(__dirname, "../frontend/build"),
-    path.join(__dirname, "../million-pixel-app/build"),
-    path.join(__dirname, "build"),
-  ];
-  const frontendPath = candidates.find((p) => fs.existsSync(p));
-  if (frontendPath) {
-    app.use(express.static(frontendPath));
-    // Express 5-safe catch-all
-    app.get("/(.*)", (_req, res) => {
-      res.sendFile(path.join(frontendPath, "index.html"));
-    });
-    console.log(`Serving frontend from: ${frontendPath}`);
-  } else {
-    console.log("No frontend build found — API-only mode.");
-  }
-})();
 
 // ---------- start ----------
 const port = process.env.PORT || 3001;
