@@ -52,7 +52,7 @@ app.get(["/healthz", `${BASE_PATH}/healthz`], (_req, res) =>
 
 /* ---------- stripe ---------- */
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2024-06-20",
+  apiVersion: "2018-11-08",
 });
 
 const nowTs = () => Date.now();
