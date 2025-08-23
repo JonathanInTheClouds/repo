@@ -7,8 +7,15 @@ import cors from "cors";
 import http from "http";
 import { Server as SocketIOServer } from "socket.io";
 
+// import {
+//   getAllCells,
+//   tryInsertEvent,
+//   recordDonation,
+//   allocateCellsForEventAtomic,
+// } from "./db.js";
+
 import {
-  getAllCells,
+  getAllCellsWithMeta,
   tryInsertEvent,
   recordDonation,
   allocateCellsForEventAtomic,
@@ -190,9 +197,19 @@ router.post("/create-checkout-session", async (req, res) => {
   }
 });
 
+// router.get("/state", async (_req, res) => {
+//   try {
+//     const cells = await getAllCells();
+//     res.json({ cells });
+//   } catch (e) {
+//     console.error("GET /state error:", e);
+//     res.status(500).json({ error: "failed to load state" });
+//   }
+// });
+
 router.get("/state", async (_req, res) => {
   try {
-    const cells = await getAllCells();
+    const cells = await getAllCellsWithMeta();
     res.json({ cells });
   } catch (e) {
     console.error("GET /state error:", e);
@@ -252,9 +269,18 @@ if (BASE_PATH !== "/") {
 }
 
 /* ---------- sockets ---------- */
+// io.on("connection", async (socket) => {
+//   try {
+//     const cells = await getAllCells();
+//     socket.emit("bootstrap", { cells });
+//   } catch (e) {
+//     console.error("socket bootstrap error:", e);
+//   }
+// });
+// socket bootstrap
 io.on("connection", async (socket) => {
   try {
-    const cells = await getAllCells();
+    const cells = await getAllCellsWithMeta();
     socket.emit("bootstrap", { cells });
   } catch (e) {
     console.error("socket bootstrap error:", e);

@@ -155,4 +155,26 @@ export async function getCellDetails(x, y) {
   );
   return rows[0] || null;
 }
+
+// db.js
+export async function getAllCellsWithMeta() {
+  const { rows } = await pool.query(
+    `
+    SELECT
+      r.x,
+      r.y,
+      d.message,
+      d.amount_cents AS "amountCents",
+      EXTRACT(EPOCH FROM r.created_at) * 1000 AS "ts"
+    FROM revealed r
+    LEFT JOIN cell_allocations ca
+      ON ca.x = r.x AND ca.y = r.y
+    LEFT JOIN donations d
+      ON d.event_id = ca.event_id
+    ORDER BY r.x, r.y
+    `
+  );
+  return rows;
+}
+
 export default pool;
