@@ -96,16 +96,26 @@ router.post(
           const cellsToReveal = Math.floor(amountCents / centsPerCell);
 
           if (cellsToReveal <= 0) {
+            // Persist the message-only donation for audit/history
+            await recordDonation({
+              eventId: event.id,
+              amountCents,
+              message,
+              cells: 0, // no cells allocated
+            });
+
+            // Tell clients to show a bubble, but don't allocate any cells
             io.emit("donation_message", {
               orderId: event.id,
               amountCents,
-              message,
+              message, // can be empty; frontend falls back to "Thank You!"
               ts: nowTs(),
             });
+
             console.log(
-              `ℹ️ Message only for ${event.id} — $${(amountCents / 100).toFixed(
-                2
-              )}`
+              `ℹ️ Message-only donation for ${event.id} — $${(
+                amountCents / 100
+              ).toFixed(2)}`
             );
             return res.json({ received: true });
           }
