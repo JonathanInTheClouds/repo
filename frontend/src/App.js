@@ -116,7 +116,7 @@ function NavBar() {
         <nav className="links">
           <Nav to="/" label="Canvas" />
           <Nav to="/support" label="Support" />
-          <Nav to="/simulate" label="Simulate" />
+          {/* <Nav to="/simulate" label="Simulate" /> */}
         </nav>
 
         {/* right: remaining + CTA */}
