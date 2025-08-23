@@ -470,11 +470,11 @@ export default function CanvasPage() {
       top,
       message: message && message.trim() ? message : "Thank You!",
       amountCents,
-      until: Date.now() + 9000,
+      until: Date.now() + 30000,
     });
 
     if (bubbleTimerRef.current) clearTimeout(bubbleTimerRef.current);
-    bubbleTimerRef.current = setTimeout(() => setBubble(null), 9000);
+    bubbleTimerRef.current = setTimeout(() => setBubble(null), 30000);
   }
 
   const remaining = useMemo(
